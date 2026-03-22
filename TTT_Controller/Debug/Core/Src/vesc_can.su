@@ -1,0 +1,12 @@
+../Core/Src/vesc_can.c:23:13:VESC_Send	56	static
+../Core/Src/vesc_can.c:55:6:VESC_Init	56	static
+../Core/Src/vesc_can.c:80:6:VESC_SetDuty	16	static
+../Core/Src/vesc_can.c:88:6:VESC_SetCurrent	16	static
+../Core/Src/vesc_can.c:94:6:VESC_SetERPM	16	static
+../Core/Src/vesc_can.c:100:6:VESC_SetDutyAll	24	static
+../Core/Src/vesc_can.c:106:6:VESC_KeepAlive	16	static
+../Core/Src/vesc_can.c:112:6:VESC_KeepAliveAll	16	static
+../Core/Src/vesc_can.c:118:6:VESC_Brake	16	static
+../Core/Src/vesc_can.c:128:6:VESC_BrakeAll	16	static
+../Core/Src/vesc_can.c:138:6:VESC_ProcessRx	64	static
+../Core/Src/vesc_can.c:185:15:VESC_GetStatus	16	static
