@@ -60,8 +60,8 @@ all: main-build
 main-build: TTT_Controller.elf secondary-outputs
 
 # Tool invocations
-TTT_Controller.elf TTT_Controller.map: $(OBJS) $(USER_OBJS) C:\Users\jonat\OneDrive\Desktop\Old\ School\ Work\TTT_Controller\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "TTT_Controller.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\jonat\OneDrive\Desktop\Old School Work\TTT_Controller\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="TTT_Controller.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+TTT_Controller.elf TTT_Controller.map: $(OBJS) $(USER_OBJS) C:\TTT_Controller\TTT_Controller\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "TTT_Controller.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\TTT_Controller\TTT_Controller\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="TTT_Controller.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
