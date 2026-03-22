@@ -2,30 +2,34 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
+  * @brief          : TTT 5-joint robotic arm controller
   *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
+  * Serial protocol (host PC → STM32, 115200 baud, newline-terminated):
   *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *   J j1 j2 j3 j4 j5   Joystick axes, each -1.0 … +1.0   (send at ~50 Hz)
+  *   G n kg              Set gravity feedforward gain on joint n (1-5)
+  *   P n kp kv           Set PD gains on joint n
+  *   H                   Home — zero all position estimates at current pose
+  *   E                   Emergency stop
+  *   R                   Print joint status
+  *   ?                   Help
   *
+  * The host PC should poll the Xbox controller and stream J commands at 50 Hz.
+  * If no J command arrives within 250 ms the STM32 will brake all motors.
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "vesc_can.h"
+#include "arm_controller.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,7 +39,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define CMD_BUF_LEN      80    /* max incoming serial command length         */
+#define JOY_WATCHDOG_MS  250   /* brake if no J command received in this ms  */
+#define CTRL_PERIOD_MS   10    /* control loop period → 100 Hz               */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,16 +56,15 @@ UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 static uint8_t  uart_rx_byte;
-
-#define CMD_BUF_LEN 64
 static char     cmd_buf[CMD_BUF_LEN];
 static uint8_t  cmd_idx   = 0;
 static uint8_t  cmd_ready = 0;
 
-static float    motor_current[5]  = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-static uint32_t last_cmd_tick     = 0;
-static uint32_t last_status_tick  = 0;
+/* Joystick axes, written by Process_Command() and read by the control loop */
+static float    joy_axes[NUM_JOINTS] = {0};
 
+static uint32_t last_joy_tick  = 0;   /* timestamp of last J command         */
+static uint32_t last_ctrl_tick = 0;   /* timestamp of last control loop tick  */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -69,145 +74,122 @@ static void MX_GPIO_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void Process_Command(const char *cmd);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* CAN RX interrupt → drain FIFO and update VESC status structs */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
     VESC_ProcessRx();
 }
 
-static void Print_Status(void)
+/* UART RX interrupt — accumulate bytes into cmd_buf, set cmd_ready on newline */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    char line[128];
-    const int POLE_PAIRS = 7;  /* adjust for your motor */
+    if (huart->Instance != USART3) return;
 
-    for (int i = 0; i < VESC_NUM_MOTORS; i++)
+    char c = (char)uart_rx_byte;
+    if (c == '\n' || c == '\r')
     {
-        VescStatus_t *s = VESC_GetStatus((VescMotor_t)i);
-        if (s == NULL) continue;
-
-        int32_t rpm = s->erpm / POLE_PAIRS;
-
-        snprintf(line, sizeof(line),
-                 "M%d | RPM:%6ld  Curr:%5.1fA  Duty:%+.3f\r\n",
-                 i + 1, (long)rpm, s->current, s->duty);
-        HAL_UART_Transmit(&huart3, (uint8_t *)line, strlen(line), 100);
-        s->updated = 0;
+        if (cmd_idx > 0)
+        {
+            cmd_buf[cmd_idx] = '\0';
+            cmd_ready = 1;
+            cmd_idx   = 0;
+        }
     }
+    else if (cmd_idx < CMD_BUF_LEN - 1)
+    {
+        cmd_buf[cmd_idx++] = c;
+    }
+    HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1);
 }
 
-static void Process_Command(char *cmd)
+/*
+ * Process one null-terminated command string.
+ *
+ * J commands arrive at ~50 Hz and get no response (keep the channel clear).
+ * All other commands are interactive and get a short ACK or data reply.
+ */
+static void Process_Command(const char *cmd)
 {
-    char response[128];
-    response[0] = '\0';
+    char resp[160];
+    resp[0] = '\0';
 
-    /* ca <amps> - set current on all motors */
-    if ((cmd[0] == 'c' || cmd[0] == 'C') &&
-        (cmd[1] == 'a' || cmd[1] == 'A'))
+    if (cmd[0] == 'J' || cmd[0] == 'j')
     {
-        float amps = atof(&cmd[2]);
-        for (int i = 0; i < VESC_NUM_MOTORS; i++) motor_current[i] = amps;
-        for (int i = 0; i < VESC_NUM_MOTORS; i++) VESC_SetCurrent((VescMotor_t)i, amps);
-        last_cmd_tick = HAL_GetTick();
-        snprintf(response, sizeof(response), "OK all current=%.2fA\r\n", amps);
-    }
-    /* c <motor> <amps> - set current on one motor */
-    else if (cmd[0] == 'c' || cmd[0] == 'C')
-    {
-        char *ptr   = &cmd[1];
-        int   motor = (int)strtol(ptr, &ptr, 10) - 1;
-        float amps  = strtof(ptr, NULL);
-
-        if (motor >= 0 && motor < VESC_NUM_MOTORS)
+        /* J j1 j2 j3 j4 j5 — joystick update from host PC
+         * Values are floats in the range -1.0 … +1.0.
+         * Example: "J 0.50 -0.25 0.00 0.75 -0.10"                         */
+        char *p = (char *)cmd + 1;
+        for (int i = 0; i < NUM_JOINTS; i++)
         {
-            motor_current[motor] = amps;
-            VESC_SetCurrent((VescMotor_t)motor, amps);
-            last_cmd_tick = HAL_GetTick();
-            snprintf(response, sizeof(response),
-                     "OK motor%d current=%.2fA\r\n", motor + 1, amps);
+            float v    = strtof(p, &p);
+            joy_axes[i] = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
         }
-        else
-        {
-            snprintf(response, sizeof(response), "ERR usage: c <1-5> <amps>\r\n");
-        }
+        last_joy_tick = HAL_GetTick();
+        return;  /* no response — this path runs at 50 Hz */
     }
-    /* sa - stop all */
-    else if ((cmd[0] == 's' || cmd[0] == 'S') &&
-             (cmd[1] == 'a' || cmd[1] == 'A'))
+    else if (cmd[0] == 'G' || cmd[0] == 'g')
     {
-        for (int i = 0; i < VESC_NUM_MOTORS; i++) motor_current[i] = 0.0f;
-        VESC_BrakeAll();
-        last_cmd_tick = HAL_GetTick();
-        snprintf(response, sizeof(response), "OK all stopped\r\n");
+        /* G n kg — set gravity feedforward gain for joint n (1-based) */
+        char *p  = (char *)cmd + 1;
+        int   n  = (int)strtol(p, &p, 10) - 1;
+        float kg = strtof(p, &p);
+        ArmController_SetGravityGain(n, kg);
+        snprintf(resp, sizeof(resp), "OK G J%d kg=%.3f\r\n", n + 1, kg);
     }
-    /* s <motor> - stop one */
-    else if (cmd[0] == 's' || cmd[0] == 'S')
+    else if (cmd[0] == 'P' || cmd[0] == 'p')
     {
-        char *ptr   = &cmd[1];
-        int   motor = (int)strtol(ptr, &ptr, 10) - 1;
-        if (motor >= 0 && motor < VESC_NUM_MOTORS)
-        {
-            motor_current[motor] = 0.0f;
-            VESC_Brake((VescMotor_t)motor);
-            last_cmd_tick = HAL_GetTick();
-            snprintf(response, sizeof(response),
-                     "OK motor%d stopped\r\n", motor + 1);
-        }
-        else
-        {
-            snprintf(response, sizeof(response), "ERR usage: s <1-5> or sa\r\n");
-        }
+        /* P n kp kv — set PD gains for joint n (1-based) */
+        char *p  = (char *)cmd + 1;
+        int   n  = (int)strtol(p, &p, 10) - 1;
+        float kp = strtof(p, &p);
+        float kv = strtof(p, &p);
+        ArmController_SetPDGains(n, kp, kv);
+        snprintf(resp, sizeof(resp), "OK P J%d kp=%.2f kv=%.2f\r\n",
+                 n + 1, kp, kv);
     }
-    /* r - status */
-    else if (cmd[0] == 'r' || cmd[0] == 'R')
+    else if (cmd[0] == 'H' || cmd[0] == 'h')
     {
-        Print_Status();
+        /* H — home: zero all position estimates at the current physical pose */
+        ArmController_Home();
+        snprintf(resp, sizeof(resp), "OK HOME\r\n");
+    }
+    else if (cmd[0] == 'E' || cmd[0] == 'e')
+    {
+        /* E — emergency stop */
+        ArmController_EStop();
+        last_joy_tick = 0;   /* keep watchdog triggered until J resumes */
+        snprintf(resp, sizeof(resp), "OK ESTOP\r\n");
+    }
+    else if (cmd[0] == 'R' || cmd[0] == 'r')
+    {
+        ArmController_PrintStatus(&huart3);
         return;
     }
-    /* ? - help */
     else if (cmd[0] == '?')
     {
         const char *help =
-            "c <1-5> <A>    set motor current\r\n"
-            "ca <A>         set ALL current\r\n"
-            "s <1-5>        stop motor (brake)\r\n"
-            "sa             stop ALL (brake)\r\n"
-            "r              print motor status\r\n";
-        HAL_UART_Transmit(&huart3, (uint8_t *)help, strlen(help), 200);
+            "J j1..j5        Joystick axes -1.0..+1.0  (50 Hz stream)\r\n"
+            "G n kg          Gravity gain joint n (1-5)\r\n"
+            "P n kp kv       PD gains joint n\r\n"
+            "H               Home (zero position estimates)\r\n"
+            "E               Emergency stop\r\n"
+            "R               Print joint status\r\n";
+        HAL_UART_Transmit(&huart3, (uint8_t *)help, strlen(help), 300);
         return;
     }
     else
     {
-        snprintf(response, sizeof(response), "ERR unknown: %s\r\n", cmd);
+        snprintf(resp, sizeof(resp), "ERR unknown: %.40s\r\n", cmd);
     }
 
-    if (response[0] != '\0')
-        HAL_UART_Transmit(&huart3, (uint8_t *)response, strlen(response), 100);
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART3)
-    {
-        char c = (char)uart_rx_byte;
-        if (c == '\n' || c == '\r')
-        {
-            if (cmd_idx > 0)
-            {
-                cmd_buf[cmd_idx] = '\0';
-                cmd_ready = 1;
-                cmd_idx   = 0;
-            }
-        }
-        else if (cmd_idx < CMD_BUF_LEN - 1)
-        {
-            cmd_buf[cmd_idx++] = c;
-        }
-        HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1);
-    }
+    if (resp[0] != '\0')
+        HAL_UART_Transmit(&huart3, (uint8_t *)resp, strlen(resp), 100);
 }
 
 /* USER CODE END 0 */
@@ -247,20 +229,24 @@ int main(void)
   MX_CAN1_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+
   VESC_Init(&hcan1);
+  ArmController_Init();
 
-     for (int i = 0; i < VESC_NUM_MOTORS; i++) motor_current[i] = 0.0f;
-     VESC_BrakeAll();
-     HAL_Delay(100);
+  /* Safe start: brake all motors before enabling the control loop */
+  VESC_BrakeAll();
+  HAL_Delay(100);
 
-     const char *welcome =
-         "5x VESC CAN Controller ready (current mode)\r\n"
-         "Type ? for help, r for motor status\r\n";
-     HAL_UART_Transmit(&huart3, (uint8_t *)welcome, strlen(welcome), 200);
+  const char *welcome =
+      "TTT Arm Controller ready\r\n"
+      "Stream: J j1 j2 j3 j4 j5  at 50 Hz\r\n"
+      "Type ? for help, R for status\r\n";
+  HAL_UART_Transmit(&huart3, (uint8_t *)welcome, strlen(welcome), 300);
 
-     HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1);
-     last_cmd_tick    = HAL_GetTick();
-     last_status_tick = HAL_GetTick();
+  HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1);
+
+  last_joy_tick  = HAL_GetTick();
+  last_ctrl_tick = HAL_GetTick();
 
   /* USER CODE END 2 */
 
@@ -271,46 +257,37 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	    /* Process UART commands */
-	  /* Process UART commands */
-	          if (cmd_ready)
-	          {
-	              cmd_ready = 0;
-	              Process_Command(cmd_buf);
-	          }
 
-	          /* Keep-alive / brake refresh every 200ms */
-	          if (HAL_GetTick() - last_cmd_tick >= 200)
-	          {
-	              last_cmd_tick = HAL_GetTick();
-	              for (int i = 0; i < VESC_NUM_MOTORS; i++)
-	              {
-	                  if (motor_current[i] > 0.01f || motor_current[i] < -0.01f)
-	                      VESC_SetCurrent((VescMotor_t)i, motor_current[i]);
-	                  else
-	                      VESC_Brake((VescMotor_t)i);
-	              }
-	          }
+    uint32_t now = HAL_GetTick();
 
-	          /* Auto-print status every 500ms when any motor is running */
-	          if (HAL_GetTick() - last_status_tick >= 500)
-	          {
-	              last_status_tick = HAL_GetTick();
-	              uint8_t any_running = 0;
-	              for (int i = 0; i < VESC_NUM_MOTORS; i++)
-	                  if (motor_current[i] > 0.01f || motor_current[i] < -0.01f)
-	                      any_running = 1;
+    /* --- Process any buffered UART command (runs as fast as the loop) --- */
+    if (cmd_ready)
+    {
+        cmd_ready = 0;
+        Process_Command(cmd_buf);
+    }
 
-	              if (any_running)
-	                  Print_Status();
-	          }
-  }
+    /* --- 100 Hz control loop -------------------------------------------- */
+    if (now - last_ctrl_tick >= CTRL_PERIOD_MS)
+    {
+        float dt       = (float)(now - last_ctrl_tick) * 0.001f;
+        last_ctrl_tick = now;
 
-
-
-
+        if (now - last_joy_tick > JOY_WATCHDOG_MS)
+        {
+            /* Host PC comms lost — brake immediately and zero the axes so
+             * that the arm does not lurch when comms are restored.         */
+            ArmController_EStop();
+            for (int i = 0; i < NUM_JOINTS; i++) joy_axes[i] = 0.0f;
+        }
+        else
+        {
+            ArmController_Update(joy_axes, dt);
+        }
+    }
 
   /* USER CODE END 3 */
+  }
 }
 
 /**
@@ -498,7 +475,6 @@ void MPU_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
@@ -516,8 +492,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
