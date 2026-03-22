@@ -1,9 +1,0 @@
-18:22:40 **** Build of configuration Debug for project Motor_Controller ****
-make all 
-Cannot run program "make": Launching failed
-
-Error: Program "make" not found in PATH
-PATH=[C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE//plugins/com.st.stm32cube.ide.jre.win64_3.4.100.202508201254/jre/bin/server;C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE//plugins/com.st.stm32cube.ide.jre.win64_3.4.100.202508201254/jre/bin;C:\Program Files\Common Files\Oracle\Java\javapath;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;C:\Program Files\NVIDIA Corporation\NVIDIA NvDLISR;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\MATLAB\R2025b\runtime\win64;C:\Program Files\MATLAB\R2025b\bin;C:\Program Files\MATLAB\R2022b\bin;C:\Program Files\Git\cmd;C:\Program Files\PuTTY\;C:\Program Files\usbipd-win\;C:\Users\jonat\AppData\Local\Programs\Python\Launcher\;C:\Users\jonat\AppData\Local\Microsoft\WindowsApps;C:\Users\jonat\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\jonat\AppData\Local\GitHubDesktop\bin;C:\iverilog\bin;C:\iverilog\gtkwave\bin;C:\iverilog\share\gtkwave;C:\gcc_arm_aarch64_none_elf\bin;;C:\ST\STM32CubeIDE_2.0.0\STM32CubeIDE]
-
-18:22:40 Build Failed. 1 errors, 0 warnings. (took 114ms)
-

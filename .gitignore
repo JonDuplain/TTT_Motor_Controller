@@ -1,0 +1,13 @@
+# STM32CubeIDE workspace metadata
+.metadata/
+
+# Build output
+TTT_Controller/Debug/*.elf
+TTT_Controller/Debug/*.bin
+TTT_Controller/Debug/*.map
+TTT_Controller/Debug/*.list
+TTT_Controller/Debug/Core/
+TTT_Controller/Debug/Drivers/
+TTT_Controller/Debug/objects.list
+TTT_Controller/Debug/objects.mk
+TTT_Controller/Debug/sources.mk
