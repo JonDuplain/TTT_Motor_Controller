@@ -1,24 +1,30 @@
 """
-Xbox Controller → UART → STM32 → 5x VESC Motor Control (Current Mode)
-======================================================================
+Xbox Controller → UART → STM32 → 5-joint Robotic Arm (Position PD + Gravity Comp)
+====================================================================================
 
 Controller mapping:
-  Left  Stick X  → Motor 1  (-MAX_AMPS to +MAX_AMPS)
-  Left  Stick Y  → Motor 2  (push forward = positive current)
-  Right Stick X  → Motor 3
-  Right Stick Y  → Motor 4  (push forward = positive current)
-  Left  Trigger  → Motor 5 forward  (0 to MAX_AMPS)
-  Right Trigger  → Motor 5 reverse  (0 to -MAX_AMPS)
-  B button       → Stop ALL motors (handbrake)
+  Left  Stick X  → Joint 1  (base yaw)
+  Left  Stick Y  → Joint 2  (shoulder)    push forward = positive direction
+  Right Stick X  → Joint 3  (elbow)
+  Right Stick Y  → Joint 4  (wrist pitch) push forward = positive direction
+  Left Trigger   → Joint 5 forward   (wrist roll)
+  Right Trigger  → Joint 5 reverse
+  B button       → Emergency stop (held = stay stopped, release = resume)
 
-Per-motor max amps defaults set in MAX_AMPS_DEFAULT (all 5A).
-Override at runtime with:  max <1-5> <amps>   e.g. "max 5 8.0"
+The STM32 runs a 100 Hz position PD + gravity feedforward loop.
+This script streams joystick axes at 50 Hz; the STM32 watchdog brakes
+all joints if no update arrives within 250 ms.
+
+Runtime commands (type in this terminal):
+  G n kg          Set gravity gain for joint n (1-5),  e.g. "G 2 10.0"
+  P n kp kv       Set PD gains for joint n,            e.g. "P 2 8.0 3.0"
+  H               Home — zero position estimates at current pose
+  E               Emergency stop
+  R               Request status printout from STM32
+  quit            Stop arm and exit
 
 Requirements:
     python -m pip install pygame pyserial
-
-Usage:
-    python xbox_controller.py
 """
 
 import pygame
@@ -29,49 +35,44 @@ import threading
 import queue
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-COM_PORT      = "COM5"    # ← change to your STM32 COM port
-BAUD_RATE     = 115200
-POLL_HZ       = 50        # controller read rate (Hz)
-DEADZONE      = 0.08      # stick deadzone (0.0 - 1.0)
-CHANGE_THRESH = 0.05      # minimum amps change before sending a new command
-KEEPALIVE_MS  = 400       # resend current if no change for this long (ms)
-NUM_MOTORS    = 5
-
-# Per-motor max current in Amps (±). All start at 5A.
-# Edit these defaults, or change at runtime with: max <1-5> <amps>
-MAX_AMPS_DEFAULT = [2.0, 5.0, 20.0, 5.0, 5.0]
+COM_PORT   = "COM5"   # ← change to your STM32 COM port
+BAUD_RATE  = 115200
+POLL_HZ    = 50       # joystick stream rate (Hz) — must be > 4 Hz for watchdog
+DEADZONE   = 0.08     # stick deadzone applied on the PC side
 # ───────────────────────────────────────────────────────────────────────────────
 
+NUM_JOINTS = 5
+
 # Xbox axis/button indices (pygame)
-AXIS_LEFT_X   = 0
-AXIS_LEFT_Y   = 1
-AXIS_RIGHT_X  = 2
-AXIS_RIGHT_Y  = 3
-AXIS_LT       = 4   # Left  Trigger: -1.0 (released) to +1.0 (full)
-AXIS_RT       = 5   # Right Trigger: -1.0 (released) to +1.0 (full)
-BTN_B         = 1
+AXIS_LEFT_X  = 0
+AXIS_LEFT_Y  = 1
+AXIS_RIGHT_X = 2
+AXIS_RIGHT_Y = 3
+AXIS_LT      = 4   # Left  Trigger: -1.0 (released) → +1.0 (full)
+AXIS_RT      = 5   # Right Trigger: -1.0 (released) → +1.0 (full)
+BTN_B        = 1
 
 # ── Shared state ───────────────────────────────────────────────────────────────
-motor_status = ["No data"] * NUM_MOTORS
+joint_status = ["--"] * NUM_JOINTS   # last status line received per joint
 status_lock  = threading.Lock()
-max_amps     = list(MAX_AMPS_DEFAULT)   # mutable at runtime
+estop_active = False
 
 
 def uart_reader(ser):
-    """Background thread: reads VESC status lines from STM32."""
+    """Background thread: read lines from STM32 and update joint_status."""
     while True:
         try:
             line = ser.readline().decode("utf-8", errors="ignore").strip()
             if not line:
                 continue
-            # Expected: "M1 | RPM:   412  Curr:  3.2A  Duty:+0.100"
-            if line.startswith("M") and "|" in line:
+            # Status line format from ArmController_PrintStatus():
+            # "J1  pos:+0.123rev  sp:+0.123rev  vel:+0.123 r/s  I:+1.23A  erpm:+1234"
+            if line.startswith("J") and "pos:" in line:
                 try:
-                    motor_num = int(line[1]) - 1
-                    data_part = line.split("|", 1)[1].strip()
-                    if 0 <= motor_num < NUM_MOTORS:
+                    idx = int(line[1]) - 1
+                    if 0 <= idx < NUM_JOINTS:
                         with status_lock:
-                            motor_status[motor_num] = data_part
+                            joint_status[idx] = line[2:].strip()
                 except (ValueError, IndexError):
                     pass
         except Exception:
@@ -79,6 +80,7 @@ def uart_reader(ser):
 
 
 def apply_deadzone(value, deadzone):
+    """Rescale so that the deadzone region maps cleanly to 0."""
     if abs(value) < deadzone:
         return 0.0
     sign = 1.0 if value > 0 else -1.0
@@ -86,63 +88,94 @@ def apply_deadzone(value, deadzone):
 
 
 def trigger_to_ratio(axis_value):
-    """Convert trigger axis (-1.0 released, +1.0 full press) to 0.0 - 1.0."""
+    """Convert trigger axis (-1.0 released, +1.0 full) to 0.0–1.0."""
     return (axis_value + 1.0) / 2.0
 
 
-def print_display(currents, stopped=False):
-    """Overwrite the terminal display block in place."""
-    lines = NUM_MOTORS + 2
+def send_joystick(ser, axes):
+    """Send the J command: J j1 j2 j3 j4 j5\n"""
+    msg = "J " + " ".join(f"{v:.3f}" for v in axes) + "\n"
+    ser.write(msg.encode())
+
+
+def print_display(axes, stopped):
+    """Overwrite the in-place terminal display."""
+    lines = NUM_JOINTS + 2
     print(f"\033[{lines}A", end="")
-    print("─" * 64)
-    for i in range(NUM_MOTORS):
-        direction = "FWD" if currents[i] > 0.05 else ("REV" if currents[i] < -0.05 else "BRK")
+    print("─" * 72)
+    labels = ["J1 Base  Yaw  (LX)", "J2 Shoulder  (LY)",
+              "J3 Elbow     (RX)", "J4 WristPitch(RY)", "J5 WristRoll (TR)"]
+    for i in range(NUM_JOINTS):
+        bar_len = int(abs(axes[i]) * 20)
+        bar = ("█" * bar_len).ljust(20)
+        direction = "→" if axes[i] > 0.01 else ("←" if axes[i] < -0.01 else "·")
         with status_lock:
-            status = motor_status[i]
-        print(f"  M{i+1} [{direction}] cmd:{currents[i]:+5.2f}A  max:{max_amps[i]:.1f}A | {status:<30}")
+            status = joint_status[i]
+        print(f"  {labels[i]}  {direction} {axes[i]:+.3f}  [{bar}]  {status[:28]:<28}")
     if stopped:
-        print("  *** STOP ALL (handbrake) ***" + " " * 36)
+        print("  *** EMERGENCY STOP — release B and move stick to resume ***" + " " * 10)
     else:
-        print(" " * 64)
+        print(" " * 72)
 
 
 def print_help():
-    print("\nRuntime commands (type in this terminal):")
-    print("  max <1-5> <amps>   set per-motor max current, e.g. 'max 5 8.0'")
-    print("  quit               stop all motors and exit")
-    print("  B button on controller = stop all (handbrake)\n")
+    print("\nRuntime commands:")
+    print("  G n kg       Gravity gain joint n (1-5),  e.g. G 2 10.0")
+    print("  P n kp kv    PD gains joint n,            e.g. P 2 8.0 3.0")
+    print("  H            Home (zero position estimates at current pose)")
+    print("  E            Emergency stop")
+    print("  R            Request joint status from STM32")
+    print("  quit         Stop arm and exit")
+    print("  B button     Emergency stop (hold)\n")
 
 
 def handle_runtime_input(line, ser):
-    """Process commands typed in the Python terminal at runtime."""
     parts = line.strip().split()
     if not parts:
         return
 
-    if parts[0].lower() == "max" and len(parts) == 3:
-        try:
-            idx = int(parts[1]) - 1
-            val = float(parts[2])
-            if 0 <= idx < NUM_MOTORS and 0.0 <= val <= 100.0:
-                max_amps[idx] = val
-                print(f"  Motor {idx+1} max current set to {val:.1f}A")
-            else:
-                print("  ERR: motor must be 1-5, amps must be 0.0-100.0")
-        except ValueError:
-            print("  ERR: usage: max <1-5> <amps>")
+    cmd = parts[0].upper()
 
-    elif parts[0].lower() == "quit":
-        ser.write(b"sa\r\n")
+    if cmd == "G" and len(parts) == 3:
+        try:
+            n  = int(parts[1])
+            kg = float(parts[2])
+            ser.write(f"G {n} {kg:.3f}\n".encode())
+        except ValueError:
+            print("  ERR: usage: G <1-5> <kg>")
+
+    elif cmd == "P" and len(parts) == 4:
+        try:
+            n  = int(parts[1])
+            kp = float(parts[2])
+            kv = float(parts[3])
+            ser.write(f"P {n} {kp:.3f} {kv:.3f}\n".encode())
+        except ValueError:
+            print("  ERR: usage: P <1-5> <kp> <kv>")
+
+    elif cmd == "H":
+        ser.write(b"H\n")
+
+    elif cmd == "E":
+        ser.write(b"E\n")
+
+    elif cmd == "R":
+        ser.write(b"R\n")
+
+    elif cmd == "QUIT":
+        ser.write(b"E\n")
         time.sleep(0.1)
         ser.close()
         pygame.quit()
         sys.exit(0)
 
     else:
-        print("  Unknown command. Type 'max <1-5> <amps>' or 'quit'")
+        print("  Unknown command. Type H for home, G/P for gains, R for status, quit to exit.")
 
 
 def main():
+    global estop_active
+
     # ── pygame init ────────────────────────────────────────────────────────────
     pygame.init()
     pygame.display.init()
@@ -164,7 +197,7 @@ def main():
 
     # ── serial init ────────────────────────────────────────────────────────────
     try:
-        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.1)
+        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.05)
         time.sleep(0.5)
         ser.reset_input_buffer()
         print(f"Serial:     {COM_PORT} @ {BAUD_RATE}")
@@ -187,29 +220,17 @@ def main():
     threading.Thread(target=stdin_reader, daemon=True).start()
 
     print_help()
-    print(f"Controlling {NUM_MOTORS} motors | B = Stop all | Ctrl+C = Exit\n")
+    print(f"Streaming to {NUM_JOINTS} joints at {POLL_HZ} Hz | B = E-stop | Ctrl+C = Exit\n")
 
     # Print initial blank display block so in-place overwrite works
-    print("─" * 64)
-    for i in range(NUM_MOTORS):
-        print(f"  M{i+1} [BRK] cmd: +0.00A  max:{max_amps[i]:.1f}A | No data                    ")
-    print(" " * 64)
+    print("─" * 72)
+    for i in range(NUM_JOINTS):
+        print(" " * 72)
+    print(" " * 72)
 
     interval      = 1.0 / POLL_HZ
-    sent_currents = [0.0] * NUM_MOTORS
-    last_send     = [0]   * NUM_MOTORS
-
-    def send_motor(idx, amps):
-        """Send current command for one motor (STM32 protocol: c <1-5> <amps>)."""
-        ser.write(f"c {idx+1} {amps:.2f}\r\n".encode())
-        sent_currents[idx] = amps
-        last_send[idx]     = int(time.time() * 1000)
-
-    def stop_all():
-        ser.write(b"sa\r\n")
-        for i in range(NUM_MOTORS):
-            sent_currents[i] = 0.0
-            last_send[i]     = int(time.time() * 1000)
+    status_timer  = 0.0   # periodic R poll
+    axes          = [0.0] * NUM_JOINTS
 
     try:
         while True:
@@ -218,50 +239,50 @@ def main():
 
             # Check for typed runtime commands
             try:
-                line = cmd_queue.get_nowait()
-                handle_runtime_input(line, ser)
+                cmd_line = cmd_queue.get_nowait()
+                handle_runtime_input(cmd_line, ser)
             except queue.Empty:
                 pass
 
-            if joystick.get_button(BTN_B):
-                stop_all()
-                print_display(sent_currents, stopped=True)
+            b_pressed = joystick.get_button(BTN_B)
 
+            if b_pressed:
+                estop_active = True
+                axes = [0.0] * NUM_JOINTS
+                ser.write(b"E\n")
+                print_display(axes, stopped=True)
             else:
+                estop_active = False
+
                 lx = apply_deadzone(joystick.get_axis(AXIS_LEFT_X),  DEADZONE)
                 ly = apply_deadzone(joystick.get_axis(AXIS_LEFT_Y),  DEADZONE)
                 rx = apply_deadzone(joystick.get_axis(AXIS_RIGHT_X), DEADZONE)
                 ry = apply_deadzone(joystick.get_axis(AXIS_RIGHT_Y), DEADZONE)
 
-                # Triggers: LT = forward, RT = reverse for motor 5
                 lt = trigger_to_ratio(joystick.get_axis(AXIS_LT))
                 rt = trigger_to_ratio(joystick.get_axis(AXIS_RT))
-                m5_ratio = lt - rt   # +1.0 full forward, -1.0 full reverse
-                if abs(m5_ratio) < DEADZONE:
-                    m5_ratio = 0.0
+                j5 = lt - rt
+                if abs(j5) < DEADZONE:
+                    j5 = 0.0
 
-                desired = [
-                    round( lx       * max_amps[0], 2),   # Left  X  → Motor 1
-                    round(-ly       * max_amps[1], 2),   # Left  Y  → Motor 2
-                    round( rx       * max_amps[2], 2),   # Right X  → Motor 3
-                    round(-ry       * max_amps[3], 2),   # Right Y  → Motor 4
-                    round( m5_ratio * max_amps[4], 2),   # Triggers → Motor 5
+                axes = [
+                     lx,   # J1 – base yaw
+                    -ly,   # J2 – shoulder   (push forward = positive)
+                     rx,   # J3 – elbow
+                    -ry,   # J4 – wrist pitch (push forward = positive)
+                     j5,   # J5 – wrist roll
                 ]
 
-                now_ms = int(time.time() * 1000)
-                for i in range(NUM_MOTORS):
-                    if abs(desired[i]) < CHANGE_THRESH:
-                        # Motor idle — let STM32 handle handbrake, don't interfere
-                        if sent_currents[i] != 0.0:
-                            # Just returned to zero — send one stop immediately
-                            send_motor(i, 0.0)
-                    else:
-                        changed   = abs(desired[i] - sent_currents[i]) >= CHANGE_THRESH
-                        timed_out = (now_ms - last_send[i]) >= KEEPALIVE_MS
-                        if changed or timed_out:
-                            send_motor(i, desired[i])
+                # Always send every cycle — the STM32 watchdog brakes in 250 ms
+                # if this stream stops, so we must never skip a cycle.
+                send_joystick(ser, axes)
+                print_display(axes, stopped=False)
 
-                print_display(sent_currents)
+                # Periodically request status from STM32 (every 2 s)
+                status_timer += interval
+                if status_timer >= 2.0:
+                    status_timer = 0.0
+                    ser.write(b"R\n")
 
             elapsed = time.time() - loop_start
             sleep   = interval - elapsed
@@ -269,8 +290,8 @@ def main():
                 time.sleep(sleep)
 
     except KeyboardInterrupt:
-        print("\n\nStopping all motors...")
-        stop_all()
+        print("\n\nStopping arm...")
+        ser.write(b"E\n")
         time.sleep(0.1)
         ser.close()
         pygame.quit()
