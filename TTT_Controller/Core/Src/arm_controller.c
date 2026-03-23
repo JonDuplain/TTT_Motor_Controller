@@ -13,6 +13,24 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
+/*
+ * Joystick slew rate [full-scale units per second].
+ * Limits how fast the commanded axis value can change each control cycle,
+ * preventing the kv × (v_des − vel_est) term from spiking when the operator
+ * suddenly deflects the stick.
+ *
+ * 1.5 / sec  → ~0.67 s to reach full deflection from rest.
+ * Lower this value for heavier / more dangerous arms.
+ */
+#define JOY_SLEW_RATE  1.5f
+
+/*
+ * Maximum dt accepted by the integrators [seconds].
+ * Guards against a stale control tick (e.g. delayed by a long UART print)
+ * producing an oversized setpoint step.
+ */
+#define DT_MAX  0.025f   /* 2.5 × the nominal 10 ms period */
+
 /* -----------------------------------------------------------------------
  * Per-joint configuration table
  *
@@ -36,24 +54,30 @@
  * pole_pairs: check your motor spec sheet.  Many outrunners use 7.
  * ----------------------------------------------------------------------- */
 static JointConfig_t cfg[NUM_JOINTS] = {
+    /*
+     * v_max is intentionally conservative — start slow, then increase once
+     * the arm has been tuned and verified to be stable.
+     * 0.20 rev/s ≈  72 °/s    0.12 rev/s ≈  43 °/s
+     */
+
     /* J1 – Base yaw (rotation around gravity vector → kg = 0) */
-    { .kp=5.0f,  .kv=2.0f,  .kg= 0.0f, .v_max=0.5f, .i_max=20.0f,
+    { .kp=5.0f,  .kv=2.0f,  .kg= 0.0f, .v_max=0.20f, .i_max=20.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 
     /* J2 – Shoulder (carries full arm weight — start with high kg) */
-    { .kp=8.0f,  .kv=3.0f,  .kg=12.0f, .v_max=0.3f, .i_max=25.0f,
+    { .kp=8.0f,  .kv=3.0f,  .kg=12.0f, .v_max=0.12f, .i_max=25.0f,
       .gear_ratio=0.0125f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
     /* J3 – Elbow */
-    { .kp=6.0f,  .kv=2.5f,  .kg= 6.0f, .v_max=0.4f, .i_max=20.0f,
+    { .kp=6.0f,  .kv=2.5f,  .kg= 6.0f, .v_max=0.15f, .i_max=20.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-0.75f, .pos_max= 0.75f },
 
     /* J4 – Wrist pitch */
-    { .kp=4.0f,  .kv=1.5f,  .kg= 2.0f, .v_max=0.5f, .i_max=15.0f,
+    { .kp=4.0f,  .kv=1.5f,  .kg= 2.0f, .v_max=0.20f, .i_max=15.0f,
       .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-1.0f,  .pos_max= 1.0f  },
 
     /* J5 – Wrist roll (rotation around long axis → kg = 0) */
-    { .kp=3.0f,  .kv=1.0f,  .kg= 0.0f, .v_max=0.6f, .i_max=15.0f,
+    { .kp=3.0f,  .kv=1.0f,  .kg= 0.0f, .v_max=0.25f, .i_max=15.0f,
       .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 };
 
@@ -61,6 +85,13 @@ static JointConfig_t cfg[NUM_JOINTS] = {
  * Run-time state
  * ----------------------------------------------------------------------- */
 static JointState_t state[NUM_JOINTS];
+
+/*
+ * Slew-rate-limited version of the raw joystick axes.
+ * The raw axis value is never used directly for control — it is always
+ * approached gradually at JOY_SLEW_RATE to prevent current spikes.
+ */
+static float joy_slewed[NUM_JOINTS];
 
 /*
  * Track whether each joystick axis was in the deadband on the previous
@@ -75,6 +106,7 @@ static uint8_t was_in_deadband[NUM_JOINTS];
 void ArmController_Init(void)
 {
     memset(state,           0, sizeof(state));
+    memset(joy_slewed,      0, sizeof(joy_slewed));
     memset(was_in_deadband, 1, sizeof(was_in_deadband));
 }
 
@@ -106,6 +138,12 @@ void ArmController_Init(void)
  * ----------------------------------------------------------------------- */
 void ArmController_Update(const float joy[NUM_JOINTS], float dt)
 {
+    /* Guard against stale ticks (e.g. delayed by a long UART print).
+     * A dt spike would cause a large setpoint step and a current surge.    */
+    if (dt > DT_MAX) dt = DT_MAX;
+
+    float slew_step = JOY_SLEW_RATE * dt;
+
     for (int i = 0; i < NUM_JOINTS; i++)
     {
         VescStatus_t *s = VESC_GetStatus((VescMotor_t)i);
@@ -126,12 +164,23 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
         /* Dead-reckoning position integration */
         state[i].pos_est += state[i].vel_est * dt;
 
-        /* ---- 2. Joystick processing ------------------------------------- */
+        /* ---- 2. Joystick slew rate limiting ----------------------------- */
 
-        float j = CLAMP(joy[i], -1.0f, 1.0f);
+        /* Approach the raw joystick value gradually.  This prevents the
+         * derivative term kv × (v_des − vel_est) from spiking when the
+         * operator suddenly deflects the stick, which would produce a large
+         * instantaneous current command and a lurch.                        */
+        float raw = CLAMP(joy[i], -1.0f, 1.0f);
+        if      (raw > joy_slewed[i] + slew_step) joy_slewed[i] += slew_step;
+        else if (raw < joy_slewed[i] - slew_step) joy_slewed[i] -= slew_step;
+        else                                       joy_slewed[i]  = raw;
+
+        float j = joy_slewed[i];
         if (fabsf(j) < JOY_DEADBAND) j = 0.0f;
 
         float v_des = j * cfg[i].v_max;   /* desired output velocity [rev/s] */
+
+        /* ---- 3. Position setpoint update -------------------------------- */
 
         if (fabsf(j) > JOY_DEADBAND)
         {
@@ -150,24 +199,24 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
         }
         else
         {
-            /* Stick released — hold the frozen setpoint */
+            /* Stick in deadband — hold the frozen setpoint */
             was_in_deadband[i] = 1;
-            /* v_des is already 0 here, so velocity error term still damps
-             * any residual motion.                                         */
+            /* v_des is 0, so the velocity error term damps any residual
+             * motion and holds the arm against gravity.                    */
         }
 
-        /* ---- 3. PD + gravity feedforward -------------------------------- */
+        /* ---- 4. PD + gravity feedforward -------------------------------- */
 
         float e_pos = state[i].pos_sp  - state[i].pos_est;
         float e_vel = v_des            - state[i].vel_est;
 
         /* Gravity feedforward.
          * pos_est is in output revolutions; 1 rev = 2π rad.
-         * I_ff = kg * cos(θ)  where θ=0 is horizontal (max gravity torque),
-         * θ=π/2 is vertical (zero gravity torque).
-         * This is exact for a single-link pendulum; for a serial arm the
-         * shoulder joint carries extra distal mass — compensate with a
-         * larger kg for that joint.                                         */
+         * I_ff = kg × cos(θ)  where θ=0 is horizontal (max gravity torque)
+         * and θ=π/2 is vertical (zero gravity torque).
+         * This is exact for a single-link pendulum.  For a serial arm the
+         * shoulder kg should be higher because it supports distal mass too.
+         * Tune kg empirically: arm should hold horizontal with zero stick.  */
         float angle_rad = state[i].pos_est * 2.0f * (float)M_PI;
         float i_grav    = cfg[i].kg * cosf(angle_rad);
 
@@ -188,10 +237,13 @@ void ArmController_EStop(void)
 {
     /* Snap all setpoints to current estimates so that when the operator
      * re-enables the arm it holds where it stopped rather than driving
-     * back to wherever the setpoints were.                                */
+     * back to wherever the setpoints were.
+     * Also zero the slewed joystick values so the next engage starts
+     * from a clean ramp rather than whatever the stick was at.           */
     for (int i = 0; i < NUM_JOINTS; i++)
     {
         state[i].pos_sp    = state[i].pos_est;
+        joy_slewed[i]      = 0.0f;
         was_in_deadband[i] = 1;
     }
     VESC_BrakeAll();
@@ -208,6 +260,7 @@ void ArmController_Home(void)
         state[i].pos_est   = 0.0f;
         state[i].vel_est   = 0.0f;
         state[i].pos_sp    = 0.0f;
+        joy_slewed[i]      = 0.0f;
         was_in_deadband[i] = 1;
     }
 }
