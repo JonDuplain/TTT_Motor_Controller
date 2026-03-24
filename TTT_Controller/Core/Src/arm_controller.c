@@ -96,9 +96,15 @@ static JointConfig_t cfg[NUM_JOINTS] = {
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 
     /* J2 – Shoulder  (direct-drive 6374, no load, bench test)
-     * kv × v_max = 2.0 × 0.5 = 1.0 A initial kick — enough to spin freely.
-     * Update gear_ratio when the gearbox is fitted.                        */
-    { .kp=1.0f,  .kv=2.0f,  .kg=0.0f, .v_max=0.5f, .i_max=10.0f,
+     * kp = 0: position feedback is disabled for sensorless operation.
+     *   A noisy dead-reckoned pos_est with kp > 0 creates a growing
+     *   oscillation loop — the position estimate jumps above the ERPM
+     *   noise floor on a nudge, freezes with an offset, and kp chases it.
+     *   Re-enable kp only after a hardware encoder is fitted and pos_est
+     *   is verified to be stable and accurate.
+     * kv provides velocity damping: stick moves motor at v_des, releasing
+     *   the stick brakes it via kv × (0 − vel_est).                       */
+    { .kp=0.0f,  .kv=2.5f,  .kg=0.0f, .v_max=0.5f, .i_max=5.0f,
       .gear_ratio= 1.0f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
     /* J3 – Elbow */
