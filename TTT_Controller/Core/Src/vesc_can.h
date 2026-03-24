@@ -35,6 +35,7 @@ typedef enum {
 #define CAN_PACKET_SET_RPM                  3
 #define CAN_PACKET_STATUS_1                 9   /* ERPM, current, duty - broadcast by VESC */
 #define CAN_PACKET_SET_CURRENT_HANDBRAKE    12  /* Hold position at standstill without rotor snap */
+#define CAN_PACKET_STATUS_5                 27  /* Tachometer (cumulative motor steps), abs tachometer */
 
 /* Handbrake current applied when motor is idle.
  * SET_CURRENT_HANDBRAKE (cmd 12) resists movement from the current rotor
@@ -47,10 +48,13 @@ typedef enum {
  * Status data - one per motor, updated on CAN receive
  * ----------------------------------------------------------------------- */
 typedef struct {
-    int32_t erpm;       /* Electrical RPM - divide by pole_pairs for mech RPM */
-    float   current;    /* Motor current in Amps */
-    float   duty;       /* Duty cycle -1.0 to +1.0 */
-    uint8_t updated;    /* Set to 1 when new data arrives, cleared after read */
+    int32_t erpm;           /* Electrical RPM - divide by pole_pairs for mech RPM */
+    float   current;        /* Motor current in Amps */
+    float   duty;           /* Duty cycle -1.0 to +1.0 */
+    int32_t tachometer;     /* Cumulative motor steps from STATUS_5 (encoder only).
+                             * motor_revs = tachometer / (pole_pairs * 6)          */
+    uint8_t has_tach;       /* 1 once the first STATUS_5 frame has been received   */
+    uint8_t updated;        /* Set to 1 when new data arrives, cleared after read  */
 } VescStatus_t;
 
 /* -----------------------------------------------------------------------

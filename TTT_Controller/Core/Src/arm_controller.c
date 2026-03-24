@@ -91,29 +91,44 @@ static JointConfig_t cfg[NUM_JOINTS] = {
      * they determine velocity scaling and position estimation accuracy.
      */
 
-    /* J1 – Base yaw */
-    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
+    /* J1 – Base yaw (sensorless) */
+    { .kp=0.0f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
+      .gear_ratio=0.02f,   .pole_pairs=7,  .pos_min=-2.0f,  .pos_max= 2.0f,
+      .has_encoder=0 },
 
-    /* J2 – Shoulder  (direct-drive 6374, no load, bench test)
-     * kp = 0: position feedback disabled for sensorless operation.
-     *   Re-enable only after encoder is fitted and pos_est is verified.
-     * kv × v_des = pure current feedforward (vel_est excluded — see above).
-     *   Stick deflection → I = kv × joy × v_max.  Release → I = 0.        */
-    { .kp=0.0f,  .kv=3.0f,  .kg=0.0f, .v_max=0.5f, .i_max=5.0f,
-      .gear_ratio= 1.0f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
+    /* J2 – Shoulder (direct-drive 6374, sensorless bench test)
+     * kp=0: position hold disabled — sensorless ERPM unreliable at low speed.
+     * Velocity feedback gated on noise floor (see control law below).       */
+    { .kp=0.0f,  .kv=3.0f,  .kg=0.0f, .v_max=0.5f,  .i_max=5.0f,
+      .gear_ratio= 1.0f,   .pole_pairs=7,  .pos_min=-0.5f,  .pos_max= 0.5f,
+      .has_encoder=0 },
 
-    /* J3 – Elbow */
-    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-0.75f, .pos_max= 0.75f },
+    /* J3 – Elbow (encoder fitted)
+     *
+     * has_encoder=1 enables:
+     *   • Tachometer-based absolute position from STATUS_5 (no drift).
+     *   • Full velocity feedback without sensorless noise-floor gate.
+     *   • Position hold via kp (ERPM is clean at all speeds with encoder).
+     *
+     * Starting gains — conservative, raise after verifying smooth motion:
+     *   kv = 1.5  →  damps velocity; increase if motion is oscillatory
+     *   kp = 1.0  →  light position hold; increase for stiffer hold
+     *   v_max = 0.1 rev/s ≈ 36 °/s output shaft — slow for initial testing
+     *
+     * gear_ratio / pole_pairs MUST match the hardware before running.       */
+    { .kp=1.0f,  .kv=1.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
+      .gear_ratio=0.02f,   .pole_pairs=7,  .pos_min=-0.75f, .pos_max= 0.75f,
+      .has_encoder=1 },
 
-    /* J4 – Wrist pitch  (5010, 24 poles = 12 pole pairs) */
-    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-1.0f,  .pos_max= 1.0f  },
+    /* J4 – Wrist pitch (5010, 24 poles = 12 pole pairs, sensorless) */
+    { .kp=0.0f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
+      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-1.0f,  .pos_max= 1.0f,
+      .has_encoder=0 },
 
-    /* J5 – Wrist roll  (5010, 24 poles = 12 pole pairs) */
-    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-2.0f,  .pos_max= 2.0f  },
+    /* J5 – Wrist roll (5010, 24 poles = 12 pole pairs, sensorless) */
+    { .kp=0.0f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
+      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-2.0f,  .pos_max= 2.0f,
+      .has_encoder=0 },
 };
 
 /* -----------------------------------------------------------------------
@@ -187,13 +202,9 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
 
         /* ERPM = electrical RPM = mechanical RPM × pole_pairs
          * Convert to output-shaft velocity [rev/s]:
-         *   out_vel = (ERPM / pole_pairs / 60) × gear_ratio
-         *
-         * Sensorless noise floor: below ERPM_NOISE_FLOOR the FOC estimator
-         * is unreliable.  Treat the motor as stationary so that integrated
-         * position drift does not drive the kp term into oscillation.      */
-        float erpm = s ? (float)s->erpm : 0.0f;
-        if (fabsf(erpm) < ERPM_NOISE_FLOOR) erpm = 0.0f;
+         *   out_vel = (ERPM / pole_pairs / 60) × gear_ratio               */
+        float erpm     = s ? (float)s->erpm : 0.0f;
+        float erpm_abs = fabsf(erpm);
 
         float out_vel = (erpm / (float)cfg[i].pole_pairs / 60.0f)
                         * cfg[i].gear_ratio;
@@ -202,12 +213,39 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
          * α = 0.25 at 100 Hz gives ~4 Hz bandwidth — smooth but responsive. */
         state[i].vel_est = 0.75f * state[i].vel_est + 0.25f * out_vel;
 
-        /* Dead-reckoning position integration.
-         * Only advance when the motor is confirmed to be moving (above the
-         * noise floor).  This prevents slow ERPM noise from accumulating
-         * into a fake position offset that kp would then try to correct.   */
-        if (fabsf(erpm) >= ERPM_NOISE_FLOOR)
-            state[i].pos_est += state[i].vel_est * dt;
+        /* Position estimation.
+         *
+         * Encoder joint: use tachometer from STATUS_5 for absolute position.
+         *   motor_revs = tachometer / (pole_pairs × 6)
+         *   out_revs   = motor_revs × gear_ratio
+         * This tracks cumulative multi-turn position with no drift.
+         * Falls back to velocity integration until first STATUS_5 arrives.
+         *
+         * Sensorless joint: dead-reckon from velocity.  Gate integration on
+         * the noise floor so low-speed ERPM noise does not accumulate into a
+         * fake position offset that kp would chase.                         */
+        if (cfg[i].has_encoder)
+        {
+            if (s && s->has_tach)
+            {
+                /* Tachometer is zeroed at VESC boot, not at our Home command.
+                 * We store the tach value at home time and subtract it.      */
+                float motor_revs = (float)(s->tachometer - state[i].tach_home)
+                                   / ((float)cfg[i].pole_pairs * 6.0f);
+                state[i].pos_est = motor_revs * cfg[i].gear_ratio;
+            }
+            else
+            {
+                /* No STATUS_5 yet — integrate until first frame arrives */
+                state[i].pos_est += state[i].vel_est * dt;
+            }
+        }
+        else
+        {
+            /* Sensorless: only integrate above noise floor */
+            if (erpm_abs >= ERPM_NOISE_FLOOR)
+                state[i].pos_est += state[i].vel_est * dt;
+        }
 
         /* ---- 2. Joystick slew rate limiting ----------------------------- */
 
@@ -254,21 +292,21 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
 
         float e_pos = state[i].pos_sp  - state[i].pos_est;
 
-        /* Sensorless velocity feedback — gated on the noise floor.
+        /* Velocity error for kv term.
          *
-         * Below ERPM_NOISE_FLOOR the FOC estimator is unreliable (±300–500
-         * ERPM swings at near-zero speed).  In that region vel_fb = 0 and
-         * the kv term is pure feedforward: I = kv × v_des.  The motor
-         * accelerates freely until it crosses the noise floor.
+         * Encoder joint: ERPM is clean at all speeds → use full vel_est.
+         *   e_vel = v_des − vel_est  (proper velocity regulator)
          *
-         * Once ERPM is reliable, vel_fb = vel_est and the term becomes a
-         * proper velocity regulator: I = kv × (v_des − vel_est).  This
-         * damps the speed to v_des and brakes when the stick is released.
-         *
-         * Once a hardware encoder is fitted, remove the gate entirely:
-         *   float vel_fb = state[i].vel_est;                                */
-        float vel_fb = (fabsf(erpm) >= ERPM_NOISE_FLOOR) ? state[i].vel_est : 0.0f;
-        float e_vel  = v_des - vel_fb;
+         * Sensorless joint: ERPM near zero is noisy (±300–500 ERPM swings).
+         *   Below noise floor → vel_fb = 0 (feedforward only, no oscillation).
+         *   Above noise floor → vel_fb = vel_est (damping kicks in).        */
+        float vel_fb;
+        if (cfg[i].has_encoder)
+            vel_fb = state[i].vel_est;
+        else
+            vel_fb = (erpm_abs >= ERPM_NOISE_FLOOR) ? state[i].vel_est : 0.0f;
+
+        float e_vel = v_des - vel_fb;
 
         /* Gravity feedforward.
          * pos_est is in output revolutions; 1 rev = 2π rad.
@@ -317,6 +355,14 @@ void ArmController_Home(void)
 {
     for (int i = 0; i < NUM_JOINTS; i++)
     {
+        /* For encoder joints, snapshot the current tachometer so future
+         * position reads are relative to this physical home pose.          */
+        if (cfg[i].has_encoder)
+        {
+            VescStatus_t *s = VESC_GetStatus((VescMotor_t)i);
+            state[i].tach_home = (s && s->has_tach) ? s->tachometer : 0;
+        }
+
         state[i].pos_est   = 0.0f;
         state[i].vel_est   = 0.0f;
         state[i].pos_sp    = 0.0f;

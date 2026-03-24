@@ -40,27 +40,35 @@
  * pos_max     Soft upper travel limit [output revolutions from home].
  *             The controller clamps the setpoint to these values.
  *             Set symmetrically, e.g. -0.5 / +0.5 for ±180°.
+ *
+ * has_encoder 1 = hardware encoder fitted; ERPM is accurate at all speeds.
+ *             Enables: (a) velocity feedback without the sensorless noise-floor
+ *             gate, and (b) tachometer-based absolute position from STATUS_5
+ *             instead of dead-reckoning.  Requires STATUS_5 broadcast enabled
+ *             in VESC Tool.  Set to 0 for sensorless joints.
  */
 typedef struct {
-    float kp;
-    float kv;
-    float kg;
-    float v_max;
-    float i_max;
-    float gear_ratio;
-    int   pole_pairs;
-    float pos_min;
-    float pos_max;
+    float   kp;
+    float   kv;
+    float   kg;
+    float   v_max;
+    float   i_max;
+    float   gear_ratio;
+    int     pole_pairs;
+    float   pos_min;
+    float   pos_max;
+    uint8_t has_encoder;
 } JointConfig_t;
 
 /*
  * Per-joint run-time state (read-only from outside arm_controller.c).
  */
 typedef struct {
-    float pos_est;   /* Estimated output-shaft position [rev from home]  */
-    float vel_est;   /* Estimated output-shaft velocity [rev/s]          */
-    float pos_sp;    /* Current position setpoint [rev]                  */
-    float i_cmd;     /* Current command last sent to VESC [A]            */
+    float   pos_est;    /* Estimated output-shaft position [rev from home]  */
+    float   vel_est;    /* Estimated output-shaft velocity [rev/s]          */
+    float   pos_sp;     /* Current position setpoint [rev]                  */
+    float   i_cmd;      /* Current command last sent to VESC [A]            */
+    int32_t tach_home;  /* Tachometer value at last Home() call (encoder joints) */
 } JointState_t;
 
 /* -----------------------------------------------------------------------

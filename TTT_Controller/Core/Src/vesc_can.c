@@ -179,6 +179,23 @@ void VESC_ProcessRx(void)
             _status[motor_idx].duty    = (float)duty_raw    / 1000.0f;
             _status[motor_idx].updated = 1;
         }
+
+        /* Status 5: Tachometer (int32), Abs Tachometer (int32)
+         * Requires "Status 5" enabled in VESC Tool:
+         *   App Settings → General → CAN Status Messages → Status 5 rate > 0
+         * Provides cumulative motor steps — accurate absolute position with encoder.
+         * Conversion: motor_revs = tachometer / (pole_pairs * 6)               */
+        else if (cmd_id == CAN_PACKET_STATUS_5 && header.DLC >= 8)
+        {
+            int32_t tach = (int32_t)(
+                ((uint32_t)data[0] << 24) |
+                ((uint32_t)data[1] << 16) |
+                ((uint32_t)data[2] <<  8) |
+                ((uint32_t)data[3]));
+
+            _status[motor_idx].tachometer = tach;
+            _status[motor_idx].has_tach   = 1;
+        }
     }
 }
 
