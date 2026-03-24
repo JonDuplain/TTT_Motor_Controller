@@ -31,6 +31,23 @@
  */
 #define DT_MAX  0.025f   /* 2.5 × the nominal 10 ms period */
 
+/*
+ * Sensorless ERPM noise floor.
+ *
+ * Without a hardware encoder, ERPM comes from the VESC's sensorless FOC
+ * flux estimator.  Near zero speed this estimator is unreliable — it
+ * produces noisy, jittery values that, if integrated, accumulate fake
+ * position error and drive the kp term into rapid oscillation.
+ *
+ * When |ERPM| is below this threshold the motor is treated as stationary:
+ * velocity is forced to zero and the position integrator is frozen.
+ * The threshold is in electrical RPM.  50 ERPM ≈ 7 mechanical RPM for a
+ * 7-pole-pair motor — well within the unreliable sensorless region.
+ *
+ * Once a real encoder is fitted, this can be set to 0.
+ */
+#define ERPM_NOISE_FLOOR  50.0f
+
 /* -----------------------------------------------------------------------
  * Per-joint configuration table
  *
@@ -55,29 +72,43 @@
  * ----------------------------------------------------------------------- */
 static JointConfig_t cfg[NUM_JOINTS] = {
     /*
-     * v_max is intentionally conservative — start slow, then increase once
-     * the arm has been tuned and verified to be stable.
-     * 0.20 rev/s ≈  72 °/s    0.12 rev/s ≈  43 °/s
+     * CONSERVATIVE STARTING VALUES — sensorless, no encoder fitted.
+     *
+     * kp is near-zero intentionally.  Without an encoder, the position
+     * estimate drifts at low speed and a significant kp will chase that
+     * drift, causing oscillation.  Increase kp only after an encoder is
+     * fitted and position feedback is verified to be stable.
+     *
+     * kg = 0 until gravity compensation is needed.  Add it only once the
+     * arm is mechanically loaded and kp/kv are tuned.
+     *
+     * i_max = 5 A for bench safety.  Raise joint-by-joint after testing.
+     *
+     * v_max = 0.05 output-shaft rev/s ≈ 18 °/s.  Very slow on purpose.
+     * Increase only after verifying smooth, stable motion at this speed.
+     *
+     * gear_ratio / pole_pairs MUST be set correctly before running —
+     * they determine velocity scaling and position estimation accuracy.
      */
 
-    /* J1 – Base yaw (rotation around gravity vector → kg = 0) */
-    { .kp=5.0f,  .kv=2.0f,  .kg= 0.0f, .v_max=0.20f, .i_max=20.0f,
+    /* J1 – Base yaw */
+    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 
-    /* J2 – Shoulder (carries full arm weight — start with high kg) */
-    { .kp=8.0f,  .kv=3.0f,  .kg=12.0f, .v_max=0.12f, .i_max=25.0f,
+    /* J2 – Shoulder */
+    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.0125f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
     /* J3 – Elbow */
-    { .kp=6.0f,  .kv=2.5f,  .kg= 6.0f, .v_max=0.15f, .i_max=20.0f,
+    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-0.75f, .pos_max= 0.75f },
 
     /* J4 – Wrist pitch */
-    { .kp=4.0f,  .kv=1.5f,  .kg= 2.0f, .v_max=0.20f, .i_max=15.0f,
+    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-1.0f,  .pos_max= 1.0f  },
 
-    /* J5 – Wrist roll (rotation around long axis → kg = 0) */
-    { .kp=3.0f,  .kv=1.0f,  .kg= 0.0f, .v_max=0.25f, .i_max=15.0f,
+    /* J5 – Wrist roll */
+    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 };
 
@@ -152,8 +183,14 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
 
         /* ERPM = electrical RPM = mechanical RPM × pole_pairs
          * Convert to output-shaft velocity [rev/s]:
-         *   out_vel = (ERPM / pole_pairs / 60) × gear_ratio             */
+         *   out_vel = (ERPM / pole_pairs / 60) × gear_ratio
+         *
+         * Sensorless noise floor: below ERPM_NOISE_FLOOR the FOC estimator
+         * is unreliable.  Treat the motor as stationary so that integrated
+         * position drift does not drive the kp term into oscillation.      */
         float erpm = s ? (float)s->erpm : 0.0f;
+        if (fabsf(erpm) < ERPM_NOISE_FLOOR) erpm = 0.0f;
+
         float out_vel = (erpm / (float)cfg[i].pole_pairs / 60.0f)
                         * cfg[i].gear_ratio;
 
@@ -161,8 +198,12 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
          * α = 0.25 at 100 Hz gives ~4 Hz bandwidth — smooth but responsive. */
         state[i].vel_est = 0.75f * state[i].vel_est + 0.25f * out_vel;
 
-        /* Dead-reckoning position integration */
-        state[i].pos_est += state[i].vel_est * dt;
+        /* Dead-reckoning position integration.
+         * Only advance when the motor is confirmed to be moving (above the
+         * noise floor).  This prevents slow ERPM noise from accumulating
+         * into a fake position offset that kp would then try to correct.   */
+        if (fabsf(erpm) >= ERPM_NOISE_FLOOR)
+            state[i].pos_est += state[i].vel_est * dt;
 
         /* ---- 2. Joystick slew rate limiting ----------------------------- */
 

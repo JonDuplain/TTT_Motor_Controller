@@ -245,7 +245,10 @@ int main(void)
 
   HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1);
 
-  last_joy_tick  = HAL_GetTick();
+  /* Do NOT satisfy the watchdog here.  The arm stays braked until the PC
+   * sends its first J command.  This prevents the control loop from
+   * outputting gravity-comp current before the operator is ready.         */
+  last_joy_tick  = 0;
   last_ctrl_tick = HAL_GetTick();
 
   /* USER CODE END 2 */
