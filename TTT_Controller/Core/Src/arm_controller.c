@@ -100,7 +100,7 @@ static JointConfig_t cfg[NUM_JOINTS] = {
      *   Re-enable only after encoder is fitted and pos_est is verified.
      * kv × v_des = pure current feedforward (vel_est excluded — see above).
      *   Stick deflection → I = kv × joy × v_max.  Release → I = 0.        */
-    { .kp=0.0f,  .kv=2.5f,  .kg=0.0f, .v_max=0.5f, .i_max=5.0f,
+    { .kp=0.0f,  .kv=3.0f,  .kg=0.0f, .v_max=0.5f, .i_max=5.0f,
       .gear_ratio= 1.0f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
     /* J3 – Elbow */
@@ -254,16 +254,21 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
 
         float e_pos = state[i].pos_sp  - state[i].pos_est;
 
-        /* Sensorless operation: exclude vel_est from the current command.
-         * Sensorless ERPM near zero is wildly noisy (±300–500 ERPM swings).
-         * kv × (v_des − vel_est) would amplify that noise into real current
-         * transients that physically oscillate the motor.
-         * Using e_vel = v_des makes the kv term pure feedforward:
-         *   I = kv × joy × v_max  (stick directly commands current)
-         * No ERPM feedback → no oscillation possible.
-         * Once a hardware encoder is fitted, restore:
-         *   float e_vel = v_des - state[i].vel_est;                         */
-        float e_vel = v_des;
+        /* Sensorless velocity feedback — gated on the noise floor.
+         *
+         * Below ERPM_NOISE_FLOOR the FOC estimator is unreliable (±300–500
+         * ERPM swings at near-zero speed).  In that region vel_fb = 0 and
+         * the kv term is pure feedforward: I = kv × v_des.  The motor
+         * accelerates freely until it crosses the noise floor.
+         *
+         * Once ERPM is reliable, vel_fb = vel_est and the term becomes a
+         * proper velocity regulator: I = kv × (v_des − vel_est).  This
+         * damps the speed to v_des and brakes when the stick is released.
+         *
+         * Once a hardware encoder is fitted, remove the gate entirely:
+         *   float vel_fb = state[i].vel_est;                                */
+        float vel_fb = (fabsf(erpm) >= ERPM_NOISE_FLOOR) ? state[i].vel_est : 0.0f;
+        float e_vel  = v_des - vel_fb;
 
         /* Gravity feedforward.
          * pos_est is in output revolutions; 1 rev = 2π rad.
