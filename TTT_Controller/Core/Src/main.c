@@ -263,6 +263,12 @@ int main(void)
 
     uint32_t now = HAL_GetTick();
 
+    /* --- Drain CAN RX FIFO (belt-and-suspenders alongside the ISR).
+     * If frames arrive between ISR triggers, or if the interrupt is not
+     * firing due to a hardware issue, this ensures they are processed
+     * at least once per main-loop iteration (~10 ms worst case).        */
+    VESC_ProcessRx();
+
     /* --- Process any buffered UART command (runs as fast as the loop) --- */
     if (cmd_ready)
     {
