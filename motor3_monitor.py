@@ -1,65 +1,50 @@
 """
-Motor 3 Position Monitor
-========================
-Polls the STM32 over USB serial, sends 'R' every 200 ms, and displays
-the full J3 status line (pos, setpoint, velocity, current, erpm).
+Motor 3 Monitor
+===============
+Sends 'R' to the STM32 over serial and prints everything that comes back.
+Use this to diagnose whether the STM32 is responding at all before
+worrying about individual values.
 
-Usage:
-    python motor3_monitor.py
-
-Change COM_PORT below to match your STM32's serial port.
+Change COM_PORT to match your STM32 serial port.
+Do NOT run xbox_Controller.py at the same time — only one program can use the port.
 """
 
 import serial
 import time
 import sys
 
-COM_PORT  = "COM5"    # ← change to your STM32 port
+COM_PORT  = "COM5"    # ← change to your STM32 port (check Device Manager)
 BAUD_RATE = 115200
-POLL_HZ   = 5         # how often to send R (5 Hz is plenty)
 
 def main():
     try:
-        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.1)
+        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=0.3)
         time.sleep(0.5)
         ser.reset_input_buffer()
-        print(f"Connected: {COM_PORT} @ {BAUD_RATE}\n")
-        print("Spin motor 3 by hand and watch the values change.")
+        print(f"Connected to {COM_PORT}")
+        print("Sending R every second. Everything received is shown below.")
         print("Press Ctrl+C to stop.\n")
-        print(f"  {'pos (rev)':>12}  {'sp (rev)':>10}  {'vel (r/s)':>10}  {'I (A)':>8}  {'erpm':>10}")
-        print("  " + "─" * 60)
     except serial.SerialException as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR: Could not open {COM_PORT}: {e}")
+        print("Check Device Manager for the correct COM port number.")
         sys.exit(1)
-
-    interval = 1.0 / POLL_HZ
 
     try:
         while True:
-            t = time.time()
-
             ser.write(b"R\n")
+            print(f"--- sent R ({time.strftime('%H:%M:%S')}) ---")
 
-            # Read all lines that arrive within the poll window
-            deadline = time.time() + interval
+            # Read everything that arrives within 1 second
+            deadline = time.time() + 1.0
+            got_anything = False
             while time.time() < deadline:
-                line = ser.readline().decode("utf-8", errors="ignore").strip()
-                if not line:
-                    continue
+                line = ser.readline().decode("utf-8", errors="ignore").rstrip()
+                if line:
+                    print(f"  {repr(line)}")
+                    got_anything = True
 
-                # ArmController_PrintStatus format:
-                # "J3  pos:+0.123rev  sp:+0.123rev  vel:+0.123 r/s  I:+1.23A  erpm:+  1234"
-                if line.startswith("J3") and "pos:" in line:
-                    try:
-                        pos  = float(line.split("pos:")[1].split("rev")[0])
-                        sp   = float(line.split("sp:")[1].split("rev")[0])
-                        vel  = float(line.split("vel:")[1].split("r/s")[0])
-                        cur  = float(line.split("I:")[1].split("A")[0])
-                        erpm = int(  line.split("erpm:")[1].split()[0])
-                        print(f"  {pos:>+12.5f}  {sp:>+10.5f}  {vel:>+10.5f}  "
-                              f"{cur:>+8.3f}  {erpm:>10d}")
-                    except (IndexError, ValueError):
-                        print(f"  parse error: {line}")
+            if not got_anything:
+                print("  (nothing received)")
 
     except KeyboardInterrupt:
         print("\nStopped.")
