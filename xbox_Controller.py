@@ -55,11 +55,13 @@ BTN_B        = 1
 # ── Shared state ───────────────────────────────────────────────────────────────
 joint_status = ["--"] * NUM_JOINTS   # last status line received per joint
 status_lock  = threading.Lock()
+last_msg     = ""                    # last non-status line from STM32 (shown in display)
 estop_active = False
 
 
 def uart_reader(ser):
     """Background thread: read lines from STM32 and update joint_status."""
+    global last_msg
     while True:
         try:
             line = ser.readline().decode("utf-8", errors="ignore").strip()
@@ -75,6 +77,10 @@ def uart_reader(ser):
                             joint_status[idx] = line[2:].strip()
                 except (ValueError, IndexError):
                     pass
+            else:
+                # OK HOME, OK ESTOP, ERR ..., help text, welcome message, etc.
+                with status_lock:
+                    last_msg = line[:70]
         except Exception:
             break
 
@@ -100,7 +106,7 @@ def send_joystick(ser, axes):
 
 def print_display(axes, stopped):
     """Overwrite the in-place terminal display."""
-    lines = NUM_JOINTS + 2
+    lines = NUM_JOINTS + 3
     print(f"\033[{lines}A", end="")
     print("─" * 72)
     labels = ["J1 Base  Yaw  (LX)", "J2 Shoulder  (LY)",
@@ -116,6 +122,9 @@ def print_display(axes, stopped):
         print("  *** EMERGENCY STOP — release B and move stick to resume ***" + " " * 10)
     else:
         print(" " * 72)
+    with status_lock:
+        msg = last_msg
+    print(f"  STM32: {msg:<64}")
 
 
 def print_help():
@@ -223,9 +232,11 @@ def main():
     print(f"Streaming to {NUM_JOINTS} joints at {POLL_HZ} Hz | B = E-stop | Ctrl+C = Exit\n")
 
     # Print initial blank display block so in-place overwrite works
+    # Must match lines = NUM_JOINTS + 3 in print_display
     print("─" * 72)
     for i in range(NUM_JOINTS):
         print(" " * 72)
+    print(" " * 72)
     print(" " * 72)
 
     interval      = 1.0 / POLL_HZ
