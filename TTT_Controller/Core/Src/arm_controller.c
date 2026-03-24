@@ -103,13 +103,13 @@ static JointConfig_t cfg[NUM_JOINTS] = {
     { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-0.75f, .pos_max= 0.75f },
 
-    /* J4 – Wrist pitch */
+    /* J4 – Wrist pitch  (5010, 24 poles = 12 pole pairs) */
     { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-1.0f,  .pos_max= 1.0f  },
+      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-1.0f,  .pos_max= 1.0f  },
 
-    /* J5 – Wrist roll */
+    /* J5 – Wrist roll  (5010, 24 poles = 12 pole pairs) */
     { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.033f,  .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
+      .gear_ratio=0.033f,  .pole_pairs=12, .pos_min=-2.0f,  .pos_max= 2.0f  },
 };
 
 /* -----------------------------------------------------------------------
