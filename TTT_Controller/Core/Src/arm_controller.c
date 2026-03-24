@@ -96,14 +96,10 @@ static JointConfig_t cfg[NUM_JOINTS] = {
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 
     /* J2 – Shoulder  (direct-drive 6374, no load, bench test)
-     * kp = 0: position feedback is disabled for sensorless operation.
-     *   A noisy dead-reckoned pos_est with kp > 0 creates a growing
-     *   oscillation loop — the position estimate jumps above the ERPM
-     *   noise floor on a nudge, freezes with an offset, and kp chases it.
-     *   Re-enable kp only after a hardware encoder is fitted and pos_est
-     *   is verified to be stable and accurate.
-     * kv provides velocity damping: stick moves motor at v_des, releasing
-     *   the stick brakes it via kv × (0 − vel_est).                       */
+     * kp = 0: position feedback disabled for sensorless operation.
+     *   Re-enable only after encoder is fitted and pos_est is verified.
+     * kv × v_des = pure current feedforward (vel_est excluded — see above).
+     *   Stick deflection → I = kv × joy × v_max.  Release → I = 0.        */
     { .kp=0.0f,  .kv=2.5f,  .kg=0.0f, .v_max=0.5f, .i_max=5.0f,
       .gear_ratio= 1.0f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
@@ -257,7 +253,17 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
         /* ---- 4. PD + gravity feedforward -------------------------------- */
 
         float e_pos = state[i].pos_sp  - state[i].pos_est;
-        float e_vel = v_des            - state[i].vel_est;
+
+        /* Sensorless operation: exclude vel_est from the current command.
+         * Sensorless ERPM near zero is wildly noisy (±300–500 ERPM swings).
+         * kv × (v_des − vel_est) would amplify that noise into real current
+         * transients that physically oscillate the motor.
+         * Using e_vel = v_des makes the kv term pure feedforward:
+         *   I = kv × joy × v_max  (stick directly commands current)
+         * No ERPM feedback → no oscillation possible.
+         * Once a hardware encoder is fitted, restore:
+         *   float e_vel = v_des - state[i].vel_est;                         */
+        float e_vel = v_des;
 
         /* Gravity feedforward.
          * pos_est is in output revolutions; 1 rev = 2π rad.
