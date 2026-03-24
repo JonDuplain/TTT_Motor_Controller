@@ -95,9 +95,11 @@ static JointConfig_t cfg[NUM_JOINTS] = {
     { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7, .pos_min=-2.0f,  .pos_max= 2.0f  },
 
-    /* J2 – Shoulder */
-    { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
-      .gear_ratio=0.0125f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
+    /* J2 – Shoulder  (direct-drive 6374, no load, bench test)
+     * kv × v_max = 2.0 × 0.5 = 1.0 A initial kick — enough to spin freely.
+     * Update gear_ratio when the gearbox is fitted.                        */
+    { .kp=1.0f,  .kv=2.0f,  .kg=0.0f, .v_max=0.5f, .i_max=10.0f,
+      .gear_ratio= 1.0f, .pole_pairs=7, .pos_min=-0.5f,  .pos_max= 0.5f  },
 
     /* J3 – Elbow */
     { .kp=0.5f,  .kv=0.5f,  .kg=0.0f, .v_max=0.05f, .i_max=5.0f,
