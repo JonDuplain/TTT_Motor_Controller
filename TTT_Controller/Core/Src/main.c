@@ -65,6 +65,7 @@ static float    joy_axes[NUM_JOINTS] = {0};
 
 static uint32_t last_joy_tick  = 0;   /* timestamp of last J command         */
 static uint32_t last_ctrl_tick = 0;   /* timestamp of last control loop tick  */
+static uint8_t  watchdog_active = 0;  /* 1 once brake has been sent; cleared when J resumes */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -269,6 +270,16 @@ int main(void)
 
     uint32_t now = HAL_GetTick();
 
+    /* --- CAN bus-off recovery -------------------------------------------
+     * If the CAN peripheral goes bus-off (e.g. a node disconnects while
+     * we are transmitting), restart it so it recovers automatically.     */
+    if (hcan1.Instance->ESR & CAN_ESR_BOFF)
+    {
+        HAL_CAN_Stop(&hcan1);
+        HAL_CAN_Start(&hcan1);
+        HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+    }
+
     /* --- Drain CAN RX FIFO (belt-and-suspenders alongside the ISR).
      * If frames arrive between ISR triggers, or if the interrupt is not
      * firing due to a hardware issue, this ensures they are processed
@@ -290,13 +301,19 @@ int main(void)
 
         if (now - last_joy_tick > JOY_WATCHDOG_MS)
         {
-            /* Host PC comms lost — brake immediately and zero the axes so
-             * that the arm does not lurch when comms are restored.         */
-            ArmController_EStop();
-            for (int i = 0; i < NUM_JOINTS; i++) joy_axes[i] = 0.0f;
+            /* Host PC comms lost.  Send brake once when watchdog first fires,
+             * then hold — do NOT call VESC_BrakeAll() every tick or the CAN
+             * bus will be flooded with 500 frames/sec and go bus-off.       */
+            if (!watchdog_active)
+            {
+                watchdog_active = 1;
+                ArmController_EStop();   /* calls VESC_BrakeAll() once */
+                for (int i = 0; i < NUM_JOINTS; i++) joy_axes[i] = 0.0f;
+            }
         }
         else
         {
+            watchdog_active = 0;
             ArmController_Update(joy_axes, dt);
         }
     }

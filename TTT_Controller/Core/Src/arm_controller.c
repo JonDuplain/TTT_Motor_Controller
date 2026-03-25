@@ -116,7 +116,7 @@ static JointConfig_t cfg[NUM_JOINTS] = {
      *   v_max = 0.1 rev/s ≈ 36 °/s output shaft — slow for initial testing
      *
      * gear_ratio / pole_pairs MUST match the hardware before running.       */
-    { .kp=1.0f,  .kv=1.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
+    { .kp=2.0f,  .kv=2.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7,  .pos_min=-0.75f, .pos_max= 0.75f,
       .has_encoder=1 },
 
@@ -387,18 +387,37 @@ void ArmController_SetPDGains(int j, float kp, float kv)
 /* -----------------------------------------------------------------------
  * Status print
  * ----------------------------------------------------------------------- */
+/* nano.specs omits float printf.  Format a float as integer + fractional parts. */
+static int fmt_f3(char *buf, int n, float v)   /* x.xxx */
+{
+    long i = (long)v;
+    long f = (long)(fabsf(v - (float)i) * 1000.0f + 0.5f);
+    return snprintf(buf, n, "%+ld.%03ld", i, f);
+}
+static int fmt_f2(char *buf, int n, float v)   /* x.xx */
+{
+    long i = (long)v;
+    long f = (long)(fabsf(v - (float)i) * 100.0f + 0.5f);
+    return snprintf(buf, n, "%+ld.%02ld", i, f);
+}
+
 void ArmController_PrintStatus(UART_HandleTypeDef *huart)
 {
-    char line[128];
+    char line[160];
+    char pos[16], sp[16], vel[16], cur[16];
+
     for (int i = 0; i < NUM_JOINTS; i++)
     {
         VescStatus_t *s = VESC_GetStatus((VescMotor_t)i);
+
+        fmt_f3(pos, sizeof(pos), state[i].pos_est);
+        fmt_f3(sp,  sizeof(sp),  state[i].pos_sp);
+        fmt_f3(vel, sizeof(vel), state[i].vel_est);
+        fmt_f2(cur, sizeof(cur), state[i].i_cmd);
+
         snprintf(line, sizeof(line),
-                 "J%d  pos:%+7.3frev  sp:%+7.3frev  vel:%+6.3f r/s"
-                 "  I:%+6.2fA  erpm:%+7ld\r\n",
-                 i + 1,
-                 state[i].pos_est, state[i].pos_sp, state[i].vel_est,
-                 state[i].i_cmd,
+                 "J%d  pos:%srev  sp:%srev  vel:%s r/s  I:%sA  erpm:%+7ld\r\n",
+                 i + 1, pos, sp, vel, cur,
                  s ? (long)s->erpm : 0L);
         HAL_UART_Transmit(huart, (uint8_t *)line, strlen(line), 100);
     }
