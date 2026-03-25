@@ -131,6 +131,7 @@ def print_help():
     print("\nRuntime commands:")
     print("  G n kg       Gravity gain joint n (1-5),  e.g. G 2 10.0")
     print("  P n kp kv    PD gains joint n,            e.g. P 2 8.0 3.0")
+    print("  V n vmax     Max speed joint n [rev/s],   e.g. V 3 0.5")
     print("  H            Home (zero position estimates at current pose)")
     print("  E            Emergency stop")
     print("  R            Request joint status from STM32")
@@ -161,6 +162,14 @@ def handle_runtime_input(line, ser):
             ser.write(f"P {n} {kp:.3f} {kv:.3f}\n".encode())
         except ValueError:
             print("  ERR: usage: P <1-5> <kp> <kv>")
+
+    elif cmd == "V" and len(parts) == 3:
+        try:
+            n    = int(parts[1])
+            vmax = float(parts[2])
+            ser.write(f"V {n} {vmax:.3f}\n".encode())
+        except ValueError:
+            print("  ERR: usage: V <1-5> <rev/s>")
 
     elif cmd == "H":
         ser.write(b"H\n")

@@ -134,6 +134,15 @@ static void Process_Command(const char *cmd)
         last_joy_tick = HAL_GetTick();
         return;  /* no response — this path runs at 50 Hz */
     }
+    else if (cmd[0] == 'V' || cmd[0] == 'v')
+    {
+        /* V n v_max — set max output-shaft speed for joint n (1-based) [rev/s] */
+        char *p    = (char *)cmd + 1;
+        int   n    = (int)strtol(p, &p, 10) - 1;
+        float vmax = strtof(p, &p);
+        ArmController_SetVMax(n, vmax);
+        snprintf(resp, sizeof(resp), "OK V J%d v_max=%.3f\r\n", n + 1, vmax);
+    }
     else if (cmd[0] == 'G' || cmd[0] == 'g')
     {
         /* G n kg — set gravity feedforward gain for joint n (1-based) */

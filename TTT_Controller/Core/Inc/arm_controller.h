@@ -96,6 +96,7 @@ void ArmController_Home(void);
 /* Live tuning helpers — take effect on the next Update() call. */
 void ArmController_SetGravityGain(int joint_0based, float kg);
 void ArmController_SetPDGains(int joint_0based, float kp, float kv);
+void ArmController_SetVMax(int joint_0based, float v_max);
 
 /* Print a human-readable status table over the given UART. */
 void ArmController_PrintStatus(UART_HandleTypeDef *huart);

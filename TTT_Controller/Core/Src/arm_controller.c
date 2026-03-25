@@ -116,7 +116,7 @@ static JointConfig_t cfg[NUM_JOINTS] = {
      *   v_max = 0.1 rev/s ≈ 36 °/s output shaft — slow for initial testing
      *
      * gear_ratio / pole_pairs MUST match the hardware before running.       */
-    { .kp=2.0f,  .kv=2.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
+    { .kp=0.0f,  .kv=5.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7,  .pos_min=-0.75f, .pos_max= 0.75f,
       .has_encoder=1 },
 
@@ -382,6 +382,11 @@ void ArmController_SetGravityGain(int j, float kg)
 void ArmController_SetPDGains(int j, float kp, float kv)
 {
     if (j >= 0 && j < NUM_JOINTS) { cfg[j].kp = kp; cfg[j].kv = kv; }
+}
+
+void ArmController_SetVMax(int j, float v_max)
+{
+    if (j >= 0 && j < NUM_JOINTS) cfg[j].v_max = v_max;
 }
 
 /* -----------------------------------------------------------------------
