@@ -32,7 +32,8 @@ def main():
     try:
         while True:
             ser.write(b"R\n")
-            print(f"--- sent R ({time.strftime('%H:%M:%S')}) ---")
+            ser.write(b"C\n")
+            print(f"--- sent R + C ({time.strftime('%H:%M:%S')}) ---")
 
             # Read everything that arrives within 1 second
             deadline = time.time() + 1.0
