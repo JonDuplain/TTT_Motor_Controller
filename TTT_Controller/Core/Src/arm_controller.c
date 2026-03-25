@@ -32,6 +32,22 @@
 #define DT_MAX  0.025f   /* 2.5 × the nominal 10 ms period */
 
 /*
+ * Current slew rate [A/sec].
+ *
+ * Limits how fast the current command can rise each tick.  Without this,
+ * i_cmd = kv × v_des fires full current on the very first tick — the motor
+ * fights stiction at max current, then launches when it breaks free.
+ *
+ * With the slew rate, current ramps up gradually so the motor starts
+ * moving at a controlled pace.  The limit applies equally to increasing
+ * and decreasing current so braking is also smooth.
+ *
+ * At 100 Hz with 8 A/sec: 0.08 A per tick → reaches 4 A in 0.5 s.
+ * Raise if the arm feels sluggish to respond; lower if startup is still abrupt.
+ */
+#define I_SLEW_RATE  8.0f
+
+/*
  * Sensorless ERPM noise floor.
  *
  * Without a hardware encoder, ERPM comes from the VESC's sensorless FOC
@@ -116,7 +132,7 @@ static JointConfig_t cfg[NUM_JOINTS] = {
      *   v_max = 0.1 rev/s ≈ 36 °/s output shaft — slow for initial testing
      *
      * gear_ratio / pole_pairs MUST match the hardware before running.       */
-    { .kp=0.0f,  .kv=5.5f,  .kg=0.0f, .v_max=0.1f,  .i_max=5.0f,
+    { .kp=1.0f,  .kv=2.0f,  .kg=0.0f, .v_max=0.75f, .i_max=5.0f,
       .gear_ratio=0.02f,   .pole_pairs=7,  .pos_min=-0.75f, .pos_max= 0.75f,
       .has_encoder=1 },
 
@@ -322,6 +338,11 @@ void ArmController_Update(const float joy[NUM_JOINTS], float dt)
                     + cfg[i].kv * e_vel
                     + i_grav;
         i_cmd = CLAMP(i_cmd, -cfg[i].i_max, cfg[i].i_max);
+
+        /* Current slew rate limiter — smooths startup and prevents the motor
+         * from lurching when it breaks free of static friction.             */
+        float i_slew = I_SLEW_RATE * dt;
+        i_cmd = CLAMP(i_cmd, state[i].i_cmd - i_slew, state[i].i_cmd + i_slew);
 
         state[i].i_cmd = i_cmd;
         VESC_SetCurrent((VescMotor_t)i, i_cmd);
