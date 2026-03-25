@@ -16,6 +16,7 @@ static const uint8_t vesc_ids[5] = {
  * ----------------------------------------------------------------------- */
 static CAN_HandleTypeDef *_hcan  = NULL;
 static VescStatus_t       _status[5] = {0};
+static uint32_t           _rx_count  = 0;
 
 /* -----------------------------------------------------------------------
  * Internal: send a 4-byte extended-ID CAN frame
@@ -217,8 +218,6 @@ VescStatus_t* VESC_GetStatus(VescMotor_t motor)
  *   EPVF Error Passive flag      (1 = in error-passive state)
  *   rx_count  frames successfully parsed since boot
  * ----------------------------------------------------------------------- */
-static uint32_t _rx_count = 0;   /* incremented in VESC_ProcessRx on each good frame */
-
 void VESC_PrintDiag(UART_HandleTypeDef *huart)
 {
     if (_hcan == NULL)
