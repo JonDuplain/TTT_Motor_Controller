@@ -34,7 +34,7 @@ typedef enum {
 #define CAN_PACKET_SET_CURRENT_BRAKE        2
 #define CAN_PACKET_SET_RPM                  3
 #define CAN_PACKET_STATUS_1                 9   /* ERPM, current, duty - broadcast by VESC */
-#define CAN_PACKET_SET_CURRENT_HANDBRAKE    12  /* Hold position at standstill without rotor snap */
+#define CAN_PACKET_SET_CURRENT_HANDBRAKE    2  /* Hold position at standstill without rotor snap */
 #define CAN_PACKET_STATUS_5                 27  /* Tachometer (cumulative motor steps), abs tachometer */
 
 /* Handbrake current applied when motor is idle.
@@ -75,5 +75,6 @@ void VESC_KeepAliveAll(void);
  * ----------------------------------------------------------------------- */
 void          VESC_ProcessRx(void);
 VescStatus_t* VESC_GetStatus(VescMotor_t motor);
+void          VESC_PrintDiag(UART_HandleTypeDef *huart);
 
 #endif /* VESC_CAN_H */

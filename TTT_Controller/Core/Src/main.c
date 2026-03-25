@@ -171,6 +171,12 @@ static void Process_Command(const char *cmd)
         ArmController_PrintStatus(&huart3);
         return;
     }
+    else if (cmd[0] == 'C' || cmd[0] == 'c')
+    {
+        /* C — CAN bus diagnostic: error counters + receive frame count */
+        VESC_PrintDiag(&huart3);
+        return;
+    }
     else if (cmd[0] == '?')
     {
         const char *help =

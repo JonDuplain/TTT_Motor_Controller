@@ -178,6 +178,7 @@ void VESC_ProcessRx(void)
             _status[motor_idx].current = (float)current_raw / 10.0f;
             _status[motor_idx].duty    = (float)duty_raw    / 1000.0f;
             _status[motor_idx].updated = 1;
+            _rx_count++;
         }
 
         /* Status 5: Tachometer (int32), Abs Tachometer (int32)
@@ -195,6 +196,7 @@ void VESC_ProcessRx(void)
 
             _status[motor_idx].tachometer = tach;
             _status[motor_idx].has_tach   = 1;
+            _rx_count++;
         }
     }
 }
@@ -203,4 +205,44 @@ VescStatus_t* VESC_GetStatus(VescMotor_t motor)
 {
     if (motor >= 5) return NULL;
     return &_status[motor];
+}
+
+/* -----------------------------------------------------------------------
+ * CAN bus diagnostic — call from a debug command handler
+ * Reads the CAN Error Status Register (ESR) and reports:
+ *   TEC  Transmit Error Counter  (>127 = error passive, 255 = bus-off)
+ *   REC  Receive  Error Counter  (>127 = error passive)
+ *   LEC  Last Error Code         (0=none,1=stuff,2=form,3=ack,4=bit1,5=bit0,6=crc)
+ *   BOFF Bus-Off flag            (1 = peripheral has stopped, needs reset)
+ *   EPVF Error Passive flag      (1 = in error-passive state)
+ *   rx_count  frames successfully parsed since boot
+ * ----------------------------------------------------------------------- */
+static uint32_t _rx_count = 0;   /* incremented in VESC_ProcessRx on each good frame */
+
+void VESC_PrintDiag(UART_HandleTypeDef *huart)
+{
+    if (_hcan == NULL)
+    {
+        const char *s = "CAN not initialised\r\n";
+        HAL_UART_Transmit(huart, (uint8_t *)s, strlen(s), 100);
+        return;
+    }
+
+    uint32_t esr  = _hcan->Instance->ESR;
+    uint32_t tec  = (esr >> 16) & 0xFF;
+    uint32_t rec  = (esr >> 24) & 0xFF;
+    uint32_t lec  = (esr >>  4) & 0x07;
+    uint32_t boff = (esr >>  2) & 0x01;
+    uint32_t epvf = (esr >>  1) & 0x01;
+
+    const char *lec_str[] = {
+        "none", "stuff", "form", "ack", "bit1", "bit0", "crc", "set"
+    };
+
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "CAN ESR: TEC=%lu  REC=%lu  LEC=%s  BOFF=%lu  EPVF=%lu"
+             "  rx_frames=%lu\r\n",
+             tec, rec, lec_str[lec], boff, epvf, _rx_count);
+    HAL_UART_Transmit(huart, (uint8_t *)buf, strlen(buf), 200);
 }
